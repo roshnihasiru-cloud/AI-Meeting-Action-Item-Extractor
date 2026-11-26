@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Meeting Action Item Extractor</title>
+<style>
+  :root { color-scheme: light; --ink:#172033; --muted:#667085; --line:#e4e7ec; --accent:#4f46e5; --bg:#f5f7fb; }
+  * { box-sizing:border-box; }
+  body { margin:0; padding:32px 16px; font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; background:var(--bg); color:var(--ink); }
+  .app { max-width:850px; margin:0 auto; background:white; border:1px solid var(--line); border-radius:18px; padding:28px; box-shadow:0 12px 35px rgba(16,24,40,.07); }
+  h1 { margin:0 0 8px; font-size:clamp(1.45rem,3vw,2rem); }
+  .intro { margin:0 0 24px; color:var(--muted); line-height:1.5; }
+  label, .field-title { display:block; font-weight:650; margin:18px 0 8px; }
+  textarea, input { width:100%; border:1px solid #cfd4dc; border-radius:10px; padding:12px 13px; font:inherit; color:var(--ink); background:white; }
+  textarea { min-height:190px; resize:vertical; line-height:1.5; }
+  textarea:focus, input:focus { outline:3px solid rgba(79,70,229,.13); border-color:var(--accent); }
+  .modes { display:flex; gap:10px; flex-wrap:wrap; }
+  .mode-option { display:flex; align-items:center; gap:8px; border:1px solid var(--line); border-radius:10px; padding:10px 14px; cursor:pointer; font-weight:600; }
+  .mode-option input { width:auto; accent-color:var(--accent); }
+  .api-panel { margin-top:14px; padding:14px; border:1px dashed #c7c9f7; background:#f8f8ff; border-radius:12px; }
+  .hint { color:var(--muted); font-size:.88rem; line-height:1.45; margin:8px 0 0; }
+  .hidden { display:none; }
+  button { border:0; border-radius:10px; background:var(--accent); color:white; padding:12px 18px; font:inherit; font-weight:700; cursor:pointer; margin-top:20px; }
+  button:disabled { opacity:.65; cursor:wait; }
+  .secondary { background:#eef0ff; color:#3730a3; margin-left:8px; }
+  #status { margin-top:18px; color:var(--muted); white-space:pre-wrap; }
+  .results { margin-top:22px; }
+  .results h2 { font-size:1.15rem; margin-bottom:12px; }
+  .action { border:1px solid var(--line); border-radius:12px; padding:14px 16px; margin:10px 0; }
+  .task { font-weight:700; margin-bottom:9px; }
+  .meta { display:flex; flex-wrap:wrap; gap:8px 18px; color:var(--muted); font-size:.92rem; }
+  .meta strong { color:var(--ink); }
+  .review { color:var(--muted); font-size:.88rem; margin-top:16px; }
+  @media(max-width:560px) { .app{padding:20px 16px;} body{padding:16px 10px;} }
+</style>
+</head>
+<body>
+<main class="app">
+  <h1>AI Meeting Action Item Extractor</h1>
+  <p class="intro">Paste meeting notes and extract tasks, owners, and deadlines. Choose offline mode or connect to the Gemini API.</p>
+
+  <label for="notes">Meeting notes</label>
+  <textarea id="notes" placeholder="Paste your meeting notes here...">Project meeting:
+- Ananya will prepare the updated UI mockups by Friday.
+- Rahul needs to send the database schema to the team by 28 November.
+- The team will review the testing plan next week.
+- Discussed the launch date, but no decision was made.</textarea>
+
+  <div class="field-title">Extraction mode</div>
+  <div class="modes">
+    <label class="mode-option"><input type="radio" name="mode" value="offline" checked> Offline</label>
+    <label class="mode-option"><input type="radio" name="mode" value="live"> Gemini API</label>
+  </div>
+
+  <section id="apiPanel" class="api-panel hidden">
+    <label for="apiKey">Gemini API key</label>
+    <input id="apiKey" type="password" autocomplete="off" placeholder="Paste your Gemini API key">
+    <p class="hint">The key is used directly from this page and is not saved. For local personal testing only—don't publish this file or share it with your API key.</p>
+  </section>
+
+  <button id="extractBtn" type="button">✓ Extract action items</button>
+  <button id="clearBtn" class="secondary" type="button">Clear results</button>
+  <div id="status" role="status" aria-live="polite"></div>
+  <section id="results" class="results" aria-live="polite"></section>
+</main>
+<script>
+const modeInputs = document.querySelectorAll('input[name="mode"]');
+const apiPanel = document.getElementById('apiPanel');
+const notesEl = document.getElementById('notes');
+const keyEl = document.getElementById('apiKey');
+const statusEl = document.getElementById('status');
+const resultsEl = document.getElementById('results');
+const extractBtn = document.getElementById('extractBtn');
+
+modeInputs.forEach(input => input.addEventListener('change', () => {
+  apiPanel.classList.toggle('hidden', document.querySelector('input[name="mode"]:checked').value !== 'live');
+}));
+
+function offlineExtract(text) {
+  // Lightweight heuristic: each actionable sentence/bullet becomes a task.
+  const lines = text.split(/\n+/).map(s => s.replace(/^\s*[-*•\d.)]+\s*/, '').trim()).filter(Boolean);
+  const actionWords = /\b(will|must|should|need to|needs to|has to|assign(?:ed)?|prepare|send|submit|complete|finish|review|create|update|check|schedule|share|deliver|follow up)\b/i;
+  const nonActions = /\b(discussed|talked about|mentioned|no decision|brainstormed)\b/i;
+  const candidates = lines.filter(line => actionWords.test(line) && !nonActions.test(line));
+  return candidates.map(line => {
+    const ownerMatch = line.match(/\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s+(?:will|must|should|needs to|need to|has to)\b/);
+    const dateMatch = line.match(/\b(today|tomorrow|tonight|monday|tuesday|wednesday|thursday|friday|saturday|sunday|next week|by\s+[\w, -]+|(?:\d{1,2}\s+[A-Za-z]+)|(?:\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?))\b/i);
+    return {
+      task: line,
+      owner: ownerMatch ? ownerMatch[1] : 'Not specified',
+      deadline: dateMatch ? dateMatch[0] : 'Not specified'
+    };
+  });
+}
+
+async function liveExtract(text, apiKey) {
+  const prompt = `Extract only explicit meeting action items from the notes. Return valid JSON only, as an array of objects with exactly these string fields: task, owner, deadline. Use "Not specified" when owner or deadline is absent. Do not invent details.\n\nMeeting notes:\n${text}`;
+  const response = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=' + encodeURIComponent(apiKey), {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({contents:[{parts:[{text:prompt}]}], generationConfig:{temperature:0.1, responseMimeType:'application/json'}})
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data?.error?.message || `Gemini API request failed (${response.status})`);
+  const raw = data?.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('') || '[]';
+  const parsed = JSON.parse(raw.replace(/^```(?:json)?\s*|\s*```$/g, '').trim());
+  if (!Array.isArray(parsed)) throw new Error('Gemini returned an unexpected response format.');
+  return parsed.map(item => ({
+    task: String(item.task || 'Not specified'),
+    owner: String(item.owner || 'Not specified'),
+    deadline: String(item.deadline || 'Not specified')
+  }));
+}
+
+function renderActions(actions) {
+  resultsEl.innerHTML = '';
+  if (!actions.length) {
+    resultsEl.textContent = 'No action items found.';
+    return;
+  }
+  const heading = document.createElement('h2');
+  heading.textContent = 'Extracted Action Items';
+  resultsEl.appendChild(heading);
+  actions.forEach((action, index) => {
+    const card = document.createElement('article');
+    card.className = 'action';
+    const task = document.createElement('div');
+    task.className = 'task';
+    task.textContent = `${index + 1}. ${action.task}`;
+    const meta = document.createElement('div');
+    meta.className = 'meta';
+    [['Owner', action.owner], ['Due', action.deadline]].forEach(([label, value]) => {
+      const span = document.createElement('span');
+      const strong = document.createElement('strong');
+      strong.textContent = label + ': ';
+      span.append(strong, document.createTextNode(value));
+      meta.appendChild(span);
+    });
+    card.append(task, meta);
+    resultsEl.appendChild(card);
+  });
+  const note = document.createElement('p');
+  note.className = 'review';
+  note.textContent = 'Review every item against the original notes before using it.';
+  resultsEl.appendChild(note);
+}
+
+extractBtn.addEventListener('click', async () => {
+  resultsEl.innerHTML = '';
+  statusEl.textContent = '';
+  const text = notesEl.value.trim();
+  if (!text) { statusEl.textContent = 'Please enter meeting notes first.'; return; }
+  const mode = document.querySelector('input[name="mode"]:checked').value;
+  let actions;
+  extractBtn.disabled = true;
+  extractBtn.textContent = 'Extracting…';
+  try {
+    statusEl.textContent = 'Mode: ' + (mode === 'offline' ? 'Offline' : 'LIVE GEMINI API');
+    if (mode === 'offline') {
+      actions = offlineExtract(text);
+    } else {
+      const apiKey = keyEl.value.trim();
+      if (!apiKey) { statusEl.textContent = 'Please enter your Gemini API key.'; return; }
+      actions = await liveExtract(text, apiKey);
+    }
+    renderActions(actions);
+  } catch (error) {
+    statusEl.textContent = 'Could not extract items. ' + error.message + '\nCheck your API configuration and network.';
+  } finally {
+    extractBtn.disabled = false;
+    extractBtn.textContent = '✓ Extract action items';
+  }
+});
+
+document.getElementById('clearBtn').addEventListener('click', () => {
+  resultsEl.innerHTML = '';
+  statusEl.textContent = '';
+});
+</script>
+</body>
+</html>
